@@ -57,7 +57,6 @@ static constexpr uint8_t RDIV_LO = 1;
 // ステート
 enum class State : uint8_t {
   WAIT_OPEN,
-  OPEN,
   MEAS,
 };
 static State state = State::WAIT_OPEN;
@@ -159,33 +158,31 @@ static void loop(void) {
             for(int i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
                 adcOpenHistory[i] = adcVal;
             }
-            state = State::OPEN;
-        }
-        break;
-
-    case State::OPEN:
-        // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
-        adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
-        if (adcOpenSampleCounter == 0) {
-            uint16_t adcOpen = adcVal;
-            for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
-                adcOpen = adcOpenHistory[i] < adcOpen ? adcOpenHistory[i] : adcOpen;
-            }
-            estimateVcc(adcOpen);
-            adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
-            adcOpenHistory[adcOpenHistoryIndex] = adcVal;
-        }
-        setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
-        
-        if (adc2Volt(adcVal) >= VOLT_OPEN_MAX) {
             state = State::MEAS;
         }
         break;
 
-    case State::MEAS:
-        if (measureBattery(adcVal) == VoltRange::OPEN) {
-            state = State::OPEN;
+    //case State::MEAS:
+    default:
+        if (measureBattery(adcVal) != VoltRange::OPEN) {
+            state = State::MEAS;
         }
+        else {
+            // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
+            adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
+            if (adcOpenSampleCounter == 0) {
+                uint16_t adcOpen = adcVal;
+                for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
+                    adcOpen = adcOpenHistory[i] < adcOpen ? adcOpenHistory[i] : adcOpen;
+                }
+                estimateVcc(adcOpen);
+                adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
+                adcOpenHistory[adcOpenHistoryIndex] = adcVal;
+            }
+
+            setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
+        }
+
         break;
     }
     
