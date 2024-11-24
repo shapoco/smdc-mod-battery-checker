@@ -90,9 +90,11 @@ static uint8_t ledValues[NUM_LEDS];
 
 static constexpr int TARGET_FPS = 30;
 static constexpr int LED_DRIVE_INTERVAL_MS = MAX(1, 1000 / TARGET_FPS / LEVEL_RANGE);
-static constexpr int LED_PHASE_STEP_PREC = 6;
-static constexpr uint16_t LED_PHASE_PERIOD = LEVEL_STEP * (1ul << LED_PHASE_STEP_PREC);
-static uint16_t ledPhase = 0;
+static constexpr int LED_BLINK_PERIOD_MS = 500;
+static constexpr int LED_PHASE_STEP_CNTR_PERIOD = ROUND_DIV(LED_BLINK_PERIOD_MS, LED_DRIVE_INTERVAL_MS * LEVEL_RANGE);
+static_assert(0 < LED_PHASE_STEP_CNTR_PERIOD && LED_PHASE_STEP_CNTR_PERIOD <= 255);
+static uint8_t ledPhaseStepCntr = 0;
+static uint8_t ledPhase = 0;
 
 static uint16_t tickCount = 0;
 
@@ -106,9 +108,19 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt);
 static void setLevelToLeds(uint8_t level);
 static void driveLeds();
 static void lazyDelayMs(uint8_t duration);
-static uint16_t unoffsetClip16(uint16_t min, uint16_t range, uint16_t val);
+static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val);
+static uint8_t cyclicIncr8u(uint8_t x, uint8_t period);
 
-#define mul32x16(a, b) ((uint32_t)(a) * (b))
+#define IS_POW_OF_2_16U(x) \
+    ((x) == (1 <<  0) || (x) == (1 <<  1) || (x) == (1 <<  2) || (x) == (1 <<  3) || \
+     (x) == (1 <<  4) || (x) == (1 <<  5) || (x) == (1 <<  6) || (x) == (1 <<  7) || \
+     (x) == (1 <<  8) || (x) == (1 <<  9) || (x) == (1 << 10) || (x) == (1 << 11) || \
+     (x) == (1 << 12) || (x) == (1 << 13) || (x) == (1 << 14) || (x) == (1 << 15))
+
+#define CYCLIC_INCR_8U(x, period) \
+    (IS_POW_OF_2_16U(period) ? (((x) + 1) & ((period) - 1)) : cyclicIncr8u((x), (period)))
+
+#define mul32ux16u(a, b) ((uint32_t)(a) * (b))
 
 int main(void) {
     // GPIO 設定
@@ -142,6 +154,7 @@ static void loop(void) {
     switch(state) {
     case State::WAIT_OPEN:
         setLevelToLeds((tickCount & 0x200u) ? LEVEL_MAX : 0);
+
         if (ADC_OPEN_MIN - 50 <= adcVal && adcVal < ADC_OPEN_MAX + 50) {
             estimateVcc(adcVal);
             for(int i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
@@ -153,14 +166,14 @@ static void loop(void) {
 
     case State::OPEN:
         // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
-        adcOpenSampleCounter++;
-        if ((adcOpenSampleCounter & (ADC_OPEN_SAMPLE_INTERVAL - 1)) == 0) {
+        adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
+        if (adcOpenSampleCounter == 0) {
             uint16_t adcOpen = adcVal;
             for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
                 adcOpen = adcOpenHistory[i] < adcOpen ? adcOpenHistory[i] : adcOpen;
             }
             estimateVcc(adcOpen);
-            adcOpenHistoryIndex = (adcOpenHistoryIndex + 1) & (ADC_OPEN_HISTORY_SIZE - 1);
+            adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
             adcOpenHistory[adcOpenHistoryIndex] = adcVal;
         }
         setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
@@ -213,10 +226,10 @@ static void estimateVcc(uint16_t adcVal) {
     if (tmp > ADC_OPEN_MAX) tmp = 0;
     else if (tmp < ADC_OPEN_MIN) tmp = (ADC_OPEN_MAX - ADC_OPEN_MIN);
     else tmp = ADC_OPEN_MAX - tmp;
-    voltVcc = (uint16_t)(mul32x16(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
+    voltVcc = (uint16_t)(mul32ux16u(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
 
     adc3xVf = adcVal;
-    volt3xVf = mul32x16(voltVcc, adc3xVf) / ADC_VCC;
+    volt3xVf = mul32ux16u(voltVcc, adc3xVf) / ADC_VCC;
 }
 
 static void measureBattery(uint16_t adcVal) {
@@ -252,9 +265,9 @@ static void measureBattery(uint16_t adcVal) {
 
 static uint16_t adc2Volt(uint16_t adcVal) {
     constexpr uint8_t EXTRA_PREC = (1 << 4);
-    uint16_t volt = mul32x16(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
-    volt = unoffsetClip16(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
-    return mul32x16(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
+    uint16_t volt = mul32ux16u(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
+    volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
+    return mul32ux16u(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
 }
 
 static void setVoltageToLeds(VoltRange range, uint16_t volt) {
@@ -263,27 +276,27 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
     switch(range) {
     case VoltRange::BAT_1V5: 
         slope = ONE * LEVEL_RANGE / (VOLT_1V5_MAX - VOLT_1V5_MIN);
-        volt = unoffsetClip16(VOLT_1V5_MIN, VOLT_1V5_MAX - VOLT_1V5_MIN, volt);
+        volt = unoffsetClip16u(VOLT_1V5_MIN, VOLT_1V5_MAX - VOLT_1V5_MIN, volt);
         break;
 
     case VoltRange::BAT_3V0:
         slope = ONE * LEVEL_RANGE / (VOLT_3V0_MAX - VOLT_3V0_MIN);
-        volt = unoffsetClip16(VOLT_3V0_MIN, VOLT_3V0_MAX - VOLT_3V0_MIN, volt);
+        volt = unoffsetClip16u(VOLT_3V0_MIN, VOLT_3V0_MAX - VOLT_3V0_MIN, volt);
         break;
 
     case VoltRange::BAT_3V7:
         slope = ONE * LEVEL_RANGE / (VOLT_3V7_MAX - VOLT_3V7_MIN);
-        volt = unoffsetClip16(VOLT_3V7_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
+        volt = unoffsetClip16u(VOLT_3V7_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
         break;
 
     case VoltRange::BAT_9V0:
         slope = ONE * LEVEL_RANGE / (VOLT_9V0_MAX - VOLT_9V0_MIN);
-        volt = unoffsetClip16(VOLT_9V0_MIN, VOLT_9V0_MAX - VOLT_9V0_MIN, volt);
+        volt = unoffsetClip16u(VOLT_9V0_MIN, VOLT_9V0_MAX - VOLT_9V0_MIN, volt);
         break;
     }
     
     uint8_t level = LEVEL_MIN;
-    level += mul32x16(slope, volt) / ONE;
+    level += mul32ux16u(slope, volt) / ONE;
     setLevelToLeds(level);
 }
 
@@ -303,7 +316,12 @@ static void setLevelToLeds(uint8_t level) {
 }
 
 static void driveLeds() {
-    uint8_t phase = ledPhase >> LED_PHASE_STEP_PREC;
+    ledPhaseStepCntr = CYCLIC_INCR_8U(ledPhaseStepCntr, LED_PHASE_STEP_CNTR_PERIOD);
+    uint8_t phase = ledPhase;
+    if (ledPhaseStepCntr == 0) {
+        ledPhase = CYCLIC_INCR_8U(phase, LEVEL_STEP);
+    }
+
     uint8_t iled = NUM_LEDS;
     uint8_t ledMask = 1u << (NUM_LEDS - 1);
     while (iled-- != 0) {
@@ -313,7 +331,6 @@ static void driveLeds() {
         ledMask >>= 1;
         lazyDelayMs(LED_DRIVE_INTERVAL_MS);
         PORTB = 0x00;
-        ledPhase = (ledPhase + 1 < LED_PHASE_PERIOD) ? (ledPhase + 1) : 0;
     }
 }
 
@@ -327,9 +344,13 @@ static void lazyDelayMs(uint8_t duration) {
     }
 }
 
-static uint16_t unoffsetClip16(uint16_t min, uint16_t range, uint16_t val) {
+static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val) {
     val -= min;
     if (val & 0x8000u) return 0;
     if (val > range) return range;
     return val;
+}
+
+static uint8_t cyclicIncr8u(uint8_t x, uint8_t period) {
+    return (x + 1 < period) ? x + 1 : 0;
 }
