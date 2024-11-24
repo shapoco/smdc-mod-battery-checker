@@ -4,7 +4,9 @@
 #include <util/delay.h>
 #include <stdint.h>
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define ROUND_DIV(a, b) (((a) + (b) / 2) / (b))
 
 static constexpr int NUM_LEDS = 5;
 static constexpr uint8_t LED_PIN_MASK = (1 << NUM_LEDS) - 1;
@@ -48,8 +50,9 @@ static constexpr uint16_t VOLT_3V7_MAX = 4.2f * VOLT_ONE;
 static constexpr uint16_t VOLT_9V0_MIN = 7.0f * VOLT_ONE;
 static constexpr uint16_t VOLT_9V0_MAX = 9.0f * VOLT_ONE;
 
-static constexpr uint16_t RH = 10;
-static constexpr uint16_t RL = 1;
+// 入力分圧抵抗比
+static constexpr uint8_t RDIV_HI = 10;
+static constexpr uint8_t RDIV_LO = 1;
 
 // ステート
 enum class State : uint8_t {
@@ -191,7 +194,7 @@ static uint16_t readAdc() {
     for (uint8_t i = 0; i < NUM_SAMPLES; i++) {
         adcVal += analogRead();
     }
-    return (adcVal + NUM_SAMPLES / 2) / NUM_SAMPLES;
+    return ROUND_DIV(adcVal, NUM_SAMPLES);
 }
 
 static uint16_t analogRead() {
@@ -217,14 +220,15 @@ static void estimateVcc(uint16_t adcVal) {
 }
 
 static void measureBattery(uint16_t adcVal) {
-    constexpr uint8_t VOLT_DIV = 8;
+    constexpr uint8_t VOLT_DIV = 16;
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
     constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
+    static_assert(10 * VOLT_ONE / VOLT_DIV < 256);
 
     uint16_t volt = adc2Volt(adcVal);
-    uint8_t voltDiv = volt / VOLT_DIV;
+    uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
     VoltRange newRange;
     if (voltDiv < THRESH_OPEN) {
         newRange = VoltRange::OPEN;
@@ -250,7 +254,7 @@ static uint16_t adc2Volt(uint16_t adcVal) {
     constexpr uint8_t EXTRA_PREC = (1 << 4);
     uint16_t volt = mul32x16(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
     volt = unoffsetClip16(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
-    return mul32x16(volt, RH + RL) / (RL * EXTRA_PREC);
+    return mul32x16(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
 }
 
 static void setVoltageToLeds(VoltRange range, uint16_t volt) {
@@ -269,7 +273,7 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
 
     case VoltRange::BAT_3V7:
         slope = ONE * LEVEL_RANGE / (VOLT_3V7_MAX - VOLT_3V7_MIN);
-        volt = unoffsetClip16(VOLT_3V0_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
+        volt = unoffsetClip16(VOLT_3V7_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
         break;
 
     case VoltRange::BAT_9V0:
