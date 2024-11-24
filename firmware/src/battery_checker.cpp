@@ -12,7 +12,7 @@ static constexpr int NUM_LEDS = 5;
 static constexpr uint8_t LED_PIN_MASK = (1 << NUM_LEDS) - 1;
 
 // 電圧の精度
-static constexpr int VOLT_PREC = 8;
+static constexpr int VOLT_PREC = 12;
 static constexpr uint16_t VOLT_ONE = 1ul << VOLT_PREC;
 
 // レベル表示の階調
@@ -195,7 +195,7 @@ static uint16_t readAdc() {
     return hi | lo;
 }
 
-// 1N4148W の If * 3 から Vcc 電圧を推定
+// 1N4148W の Vf * 3 から Vcc 電圧を推定
 static void estimateVcc(uint16_t adcVal) {
     // ヒストリの最低値
     uint16_t adcOpen = adcVal;
@@ -221,18 +221,21 @@ static void estimateVcc(uint16_t adcVal) {
 }
 
 static void adc2Volt(uint16_t adcVal) {
-    constexpr uint8_t EXTRA_PREC = (1 << 4);
-    uint16_t volt = mul32ux16u(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
-    volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
-    volt = mul32ux16u(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
-    
+    // ADC値から電圧へ変換
+    // (adcVal * voltVcc / RL / ADC_VCC - volt3xVf / RL) * (RH + RL)
+    uint16_t volt = mul32ux16u(adcVal, voltVcc) / ADC_VCC;
+    volt = (volt >= volt3xVf) ? (volt - volt3xVf) : 0;
+    //volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
+    volt = mul32ux16u(volt, RDIV_HI + RDIV_LO) / RDIV_LO;
+    //volt = volt * (RDIV_HI + RDIV_LO) / RDIV_LO;
+
     // レンジ判定 (雑でよいので 8bit に縮めて処理する)
-    constexpr uint8_t VOLT_DIV = 16;
+    constexpr uint16_t VOLT_DIV = 1u << (VOLT_PREC - 4);
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
     constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
-    static_assert(10 * VOLT_ONE / VOLT_DIV < 256);
+    static_assert((15 * VOLT_ONE + VOLT_DIV / 2) / VOLT_DIV < 256);
     uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
     VoltRange range;
     if (voltDiv <= THRESH_OPEN) {
@@ -299,32 +302,48 @@ static void adc2Volt(uint16_t adcVal) {
 }
 
 static void setVoltageToLeds(VoltRange range, uint16_t volt) {
-    constexpr uint32_t ONE = 1ul << 8;
-    uint16_t slope = 0;
+    constexpr uint16_t ONE = VOLT_ONE;
+    constexpr uint16_t RANGE_1V5  = VOLT_1V5_MAX - VOLT_1V5_MIN;
+    constexpr uint16_t RANGE_3V0  = VOLT_3V0_MAX - VOLT_3V0_MIN;
+    constexpr uint16_t RANGE_3V7  = VOLT_3V7_MAX - VOLT_3V7_MIN;
+    constexpr uint16_t RANGE_9V0  = VOLT_9V0_MAX - VOLT_9V0_MIN;
+    constexpr uint8_t SLOPE_1V5  = ROUND_DIV((uint32_t)ONE * LEVEL_RANGE, RANGE_1V5);
+    constexpr uint8_t SLOPE_3V0  = ROUND_DIV((uint32_t)ONE * LEVEL_RANGE, RANGE_3V0);
+    constexpr uint8_t SLOPE_3V7  = ROUND_DIV((uint32_t)ONE * LEVEL_RANGE, RANGE_3V7);
+    constexpr uint8_t SLOPE_9V0  = ROUND_DIV((uint32_t)ONE * LEVEL_RANGE, RANGE_9V0);
+    uint8_t slope = 0;
+    uint16_t vrange = 0;
+    uint16_t vmin = 0;
     switch(range) {
     case VoltRange::BAT_1V5: 
-        slope = ONE * LEVEL_RANGE / (VOLT_1V5_MAX - VOLT_1V5_MIN);
-        volt = unoffsetClip16u(VOLT_1V5_MIN, VOLT_1V5_MAX - VOLT_1V5_MIN, volt);
+        slope = SLOPE_1V5;
+        vmin = VOLT_1V5_MIN;
+        vrange = RANGE_1V5;
         break;
 
     case VoltRange::BAT_3V0:
-        slope = ONE * LEVEL_RANGE / (VOLT_3V0_MAX - VOLT_3V0_MIN);
-        volt = unoffsetClip16u(VOLT_3V0_MIN, VOLT_3V0_MAX - VOLT_3V0_MIN, volt);
+        slope = SLOPE_3V0;
+        vmin = VOLT_3V0_MIN;
+        vrange = RANGE_3V0;
         break;
 
     case VoltRange::BAT_3V7:
-        slope = ONE * LEVEL_RANGE / (VOLT_3V7_MAX - VOLT_3V7_MIN);
-        volt = unoffsetClip16u(VOLT_3V7_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
+        slope = SLOPE_3V7;
+        vmin = VOLT_3V7_MIN;
+        vrange = RANGE_3V7;
         break;
 
-    case VoltRange::BAT_9V0:
-        slope = ONE * LEVEL_RANGE / (VOLT_9V0_MAX - VOLT_9V0_MIN);
-        volt = unoffsetClip16u(VOLT_9V0_MIN, VOLT_9V0_MAX - VOLT_9V0_MIN, volt);
+    //case VoltRange::BAT_9V0:
+    default:
+        slope = SLOPE_9V0;
+        vmin = VOLT_9V0_MIN;
+        vrange = RANGE_9V0;
         break;
     }
     
+    volt = unoffsetClip16u(vmin, vrange, volt);
     uint8_t level = LEVEL_MIN;
-    level += mul32ux16u(slope, volt) / ONE;
+    level += volt * slope / ONE;
     setLevelToLeds(level);
 }
 
@@ -375,8 +394,8 @@ static void lazyDelayMs(uint8_t duration) {
 }
 
 static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val) {
+    if (val < min) return 0;
     val -= min;
-    if (val & 0x8000u) return 0;
     if (val > range) return range;
     return val;
 }
