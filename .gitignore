@@ -1,4 +1,6 @@
 build/
+*-backups/
 *.o
 *.elf
 *.hex
+fp-info-cache
