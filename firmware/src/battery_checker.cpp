@@ -4,6 +4,8 @@
 #include <util/delay.h>
 #include <stdint.h>
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 static constexpr int NUM_LEDS = 5;
 static constexpr uint8_t LED_PIN_MASK = (1 << NUM_LEDS) - 1;
 
@@ -83,9 +85,10 @@ static uint16_t adc3xVf;
 // 各 LED のレベル値
 static uint8_t ledValues[NUM_LEDS];
 
-static constexpr int LED_DRIVE_INTERVAL_MS = 2;
+static constexpr int TARGET_FPS = 30;
+static constexpr int LED_DRIVE_INTERVAL_MS = MAX(1, 1000 / TARGET_FPS / LEVEL_RANGE);
 static constexpr int LED_PHASE_STEP_PREC = 6;
-static constexpr uint16_t LED_PHASE_PERIOD = NUM_LEDS * (1ul << LED_PHASE_STEP_PREC);
+static constexpr uint16_t LED_PHASE_PERIOD = LEVEL_STEP * (1ul << LED_PHASE_STEP_PREC);
 static uint16_t ledPhase = 0;
 
 static uint16_t tickCount = 0;
