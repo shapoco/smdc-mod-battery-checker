@@ -54,13 +54,6 @@ static constexpr uint16_t VOLT_9V0_MAX = 9.0f * VOLT_ONE;
 static constexpr uint8_t RDIV_HI = 10;
 static constexpr uint8_t RDIV_LO = 1;
 
-// ステート
-enum class State : uint8_t {
-  WAIT_OPEN,
-  MEAS,
-};
-static State state = State::WAIT_OPEN;
-
 // 電圧レンジ
 enum class VoltRange : uint8_t {
   OPEN,
@@ -70,18 +63,19 @@ enum class VoltRange : uint8_t {
   BAT_9V0,
 };
 
-// 電源電圧
-static uint16_t voltVcc;
-
-static constexpr uint8_t ADC_OPEN_SAMPLE_INTERVAL = (1 << 4);
+// 開放時の ADC 値ヒストリ (Vcc 電圧推定用)
+static constexpr uint8_t ADC_OPEN_SAMPLE_INTERVAL = 128;
 static constexpr uint8_t ADC_OPEN_HISTORY_SIZE = 2;
 static uint8_t adcOpenSampleCounter = 0;
 static uint16_t adcOpenHistory[ADC_OPEN_HISTORY_SIZE];
 static uint8_t adcOpenHistoryIndex = 0;
 
+// 電源電圧
+static bool vccDetected = false;
+static uint16_t voltVcc;
+
 // 1N4148W の Vf * 3
 static uint16_t volt3xVf;
-static uint16_t adc3xVf;
 
 // 各 LED のレベル値
 static uint8_t ledValues[NUM_LEDS];
@@ -97,11 +91,11 @@ static uint8_t ledPhase = 0;
 static uint16_t tickCount = 0;
 
 static void loop(void);
+static uint16_t readAdcAverage();
 static uint16_t readAdc();
-static uint16_t analogRead();
 static void estimateVcc(uint16_t adcVal);
-static VoltRange measureBattery(uint16_t adcVal);
 static uint16_t adc2Volt(uint16_t adcVal);
+static VoltRange volt2Range(uint16_t volt);
 static void setVoltageToLeds(VoltRange range, uint16_t volt);
 static void setLevelToLeds(uint8_t level);
 static void driveLeds();
@@ -144,61 +138,60 @@ int main(void) {
 }
 
 static void loop(void) {
-    uint16_t adcVal = readAdc();
+    uint16_t adcVal = readAdcAverage();
 
-    switch(state) {
-    case State::WAIT_OPEN:
-        setLevelToLeds((tickCount & 0x200u) ? LEVEL_MAX : 0);
-
+    if (!vccDetected) { // Vcc 電圧推定前
         if (ADC_OPEN_MIN - 50 <= adcVal && adcVal < ADC_OPEN_MAX + 50) {
-            estimateVcc(adcVal);
+            // 初回測定値でヒストリを埋める
             for(int i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
                 adcOpenHistory[i] = adcVal;
             }
-            state = State::MEAS;
+            // 初期 Vcc 電圧推定
+            estimateVcc(adcVal);
+            vccDetected = true;
         }
-        break;
-
-    //case State::MEAS:
-    default:
-        if (measureBattery(adcVal) == VoltRange::OPEN) {
-            // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
+        else {
+            setLevelToLeds((tickCount & 0x200u) ? LEVEL_MAX : 0);
+        }
+    }
+    else { // Vcc 電圧推定後
+        uint16_t volt = adc2Volt(adcVal); // 電池電圧の推定
+        VoltRange range = volt2Range(volt); // 電圧レンジの推定
+        
+        if (range != VoltRange::OPEN) { // 電池接続時
+            // 電圧表示
+            setVoltageToLeds(range, volt);
+        }
+        else { // 開放時
+            // Vcc 電圧や温度変化で基準電圧が変動するので定期的に更新する
             adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
             if (adcOpenSampleCounter == 0) {
-                uint16_t adcOpen = adcVal;
-                for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
-                    adcOpen = adcOpenHistory[i] < adcOpen ? adcOpenHistory[i] : adcOpen;
-                }
-                estimateVcc(adcOpen);
-                adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
-                adcOpenHistory[adcOpenHistoryIndex] = adcVal;
+                estimateVcc(adcVal);
             }
 
             setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
         }
-
-        break;
     }
     
     driveLeds();
 }
 
-static uint16_t readAdc() {
+static uint16_t readAdcAverage() {
     constexpr uint8_t NUM_SAMPLES = 8;
 #if 0
     // ダイナミック点灯を PB4-->PB0 の順にしたので PB4 は十分に長い時間 Low になっているはず
     PORTB = 0x00;
     lazyDelayMs(1);
 #endif
-    analogRead(); // 読み捨て
+    readAdc(); // 読み捨て
     uint16_t adcVal = 0;
     for (uint8_t i = 0; i < NUM_SAMPLES; i++) {
-        adcVal += analogRead();
+        adcVal += readAdc();
     }
     return ROUND_DIV(adcVal, NUM_SAMPLES);
 }
 
-static uint16_t analogRead() {
+static uint16_t readAdc() {
     ADCSRA |= _BV(ADSC); // ADC開始
     loop_until_bit_is_set(ADCSRA, ADIF); // ADC完了待ち
     uint8_t lo = ADCL; // Low 側から先に読むこと
@@ -208,19 +201,30 @@ static uint16_t analogRead() {
 
 // 1N4148W の If * 3 から Vcc 電圧を推定
 static void estimateVcc(uint16_t adcVal) {
+    // ヒストリの最低値
+    uint16_t adcOpen = adcVal;
+    for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
+        adcOpen = MIN(adcOpenHistory[i], adcOpen);
+    }
+
+    // ヒストリの更新
+    adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
+    adcOpenHistory[adcOpenHistoryIndex] = adcVal;
+
+    // Vcc 電圧推定
     constexpr uint16_t ONE = 1u << 8;
     constexpr uint32_t SLOPE = (uint32_t)ONE * (VOLT_VCC_MAX - VOLT_VCC_MIN) / (ADC_OPEN_MAX - ADC_OPEN_MIN);
-    uint16_t tmp = adcVal;
+    uint16_t tmp = adcOpen;
     if (tmp > ADC_OPEN_MAX) tmp = 0;
     else if (tmp < ADC_OPEN_MIN) tmp = (ADC_OPEN_MAX - ADC_OPEN_MIN);
     else tmp = ADC_OPEN_MAX - tmp;
     voltVcc = (uint16_t)(mul32ux16u(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
 
-    adc3xVf = adcVal;
-    volt3xVf = mul32ux16u(voltVcc, adc3xVf) / ADC_VCC;
+    // 1N4148W の Vf * 3 の推定
+    volt3xVf = mul32ux16u(voltVcc, adcOpen) / ADC_VCC;
 }
 
-static VoltRange measureBattery(uint16_t adcVal) {
+static VoltRange volt2Range(uint16_t volt) {
     // 閾値判定は雑でよいので 8bit に縮めて処理する
     constexpr uint8_t VOLT_DIV = 16;
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
@@ -229,26 +233,24 @@ static VoltRange measureBattery(uint16_t adcVal) {
     constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     static_assert(10 * VOLT_ONE / VOLT_DIV < 256);
 
-    uint16_t volt = adc2Volt(adcVal);
     uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
-    VoltRange range;
+    VoltRange newRange;
     if (voltDiv <= THRESH_OPEN) {
-        range = VoltRange::OPEN;
+        newRange = VoltRange::OPEN;
     }
     else if (voltDiv <= THRESH_1V5) {
-        range = VoltRange::BAT_1V5;
+        newRange = VoltRange::BAT_1V5;
     }
     else if (voltDiv <= THRESH_3V0) {
-        range = VoltRange::BAT_3V0;
+        newRange = VoltRange::BAT_3V0;
     }
     else if (voltDiv <= THRESH_3V7) {
-        range = VoltRange::BAT_3V7;
+        newRange = VoltRange::BAT_3V7;
     }
     else {
-        range = VoltRange::BAT_9V0;
+        newRange = VoltRange::BAT_9V0;
     }
-    setVoltageToLeds(range, volt);
-    return range;
+    return newRange;
 }
 
 static uint16_t adc2Volt(uint16_t adcVal) {
