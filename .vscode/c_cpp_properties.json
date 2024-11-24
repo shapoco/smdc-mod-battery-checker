@@ -11,7 +11,7 @@
             "cStandard": "c17",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64",
-            "compilerArgs": ["-O2", "-mmcu=$(MCU)"],
+            "compilerArgs": ["-O2", "-mmcu=attiny13a"],
         }
     ],
     "version": 4
