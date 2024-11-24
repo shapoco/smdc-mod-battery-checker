@@ -12,7 +12,7 @@ static constexpr int VOLT_PREC = 8;
 static constexpr uint16_t VOLT_ONE = 1ul << VOLT_PREC;
 
 // レベル表示の階調
-static constexpr uint8_t LEVEL_STEP = 5;
+static constexpr uint8_t LEVEL_STEP = 4;
 static constexpr uint8_t LEVEL_RANGE = NUM_LEDS * LEVEL_STEP;
 static constexpr uint8_t LEVEL_MIN = 1;
 static constexpr uint8_t LEVEL_MAX = LEVEL_MIN + LEVEL_RANGE - 1;
@@ -49,20 +49,6 @@ static constexpr uint16_t VOLT_9V0_MAX = 9.0f * VOLT_ONE;
 static constexpr uint16_t RH = 10;
 static constexpr uint16_t RL = 1;
 
-// // ADC 値から自己バッテリ電圧への変換係数
-// static constexpr int32_t ADC2LVL_MYBAT_SLOPE = LEVEL_RANGE * FIXED_ONE * ADC2VOLT_OPEN_SLOPE_FLOAT / VOLT_3V0_RANGE;
-// static constexpr int32_t ADC2LVL_MYBAT_INTERSEPT = (ADC2VOLT_OPEN_INTERSEPT_FLOAT - VOLT_3V0_MIN) * FIXED_ONE * LEVEL_RANGE / VOLT_3V0_RANGE;
-
-// LED ピン番号
-//static constexpr uint8_t ledPins[] = { 0, 1, 2, 3, 4 };
-#define LED_PINS(iled) (iled)
-
-// ADC 番号
-static constexpr uint8_t ADC_IN = 0;
-
-//
-static constexpr uint8_t PIN_ADC_GND = 4;
-
 // ステート
 enum class State : uint8_t {
   WAIT_OPEN,
@@ -89,8 +75,6 @@ static constexpr uint8_t ADC_OPEN_HISTORY_SIZE = 2;
 static uint8_t adcOpenSampleCounter = 0;
 static uint16_t adcOpenHistory[ADC_OPEN_HISTORY_SIZE];
 static uint8_t adcOpenHistoryIndex = 0;
-//static uint16_t adcOpen0;
-//static uint16_t adcOpen1;
 
 // 1N4148W の Vf * 3
 static uint16_t volt3xVf;
@@ -110,13 +94,15 @@ static void loop(void);
 static uint16_t readAdc();
 static uint16_t analogRead();
 static void estimateVcc(uint16_t adcVal);
-static void meas(uint16_t adcVal);
+static void measureBattery(uint16_t adcVal);
 static uint16_t adc2Volt(uint16_t adcVal);
 static void setVoltageToLeds(VoltRange range, uint16_t volt);
 static void setLevelToLeds(uint8_t level);
 static void driveLeds();
 static void lazyDelayMs(uint8_t duration);
 static uint16_t unoffsetClip16(uint16_t min, uint16_t range, uint16_t val);
+
+#define mul32x16(a, b) ((uint32_t)(a) * (b))
 
 int main(void) {
     // GPIO 設定
@@ -139,11 +125,9 @@ int main(void) {
 
     // 適当に電源電圧が安定するのを待つ
     lazyDelayMs(100);
-    //_delay_ms(100);
 
     // ループ処理開始
     while(true) loop();
-    //while(true) { };
 }
 
 static void loop(void) {
@@ -163,9 +147,7 @@ static void loop(void) {
 
     case State::OPEN:
         // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
-        //adcOpenSampleCounter = (adcOpenSampleCounter + 1) & (ADC_OPEN_SAMPLE_INTERVAL - 1);
         adcOpenSampleCounter++;
-        //if (adcOpenSampleCounter == 0) {
         if ((adcOpenSampleCounter & (ADC_OPEN_SAMPLE_INTERVAL - 1)) == 0) {
             uint16_t adcOpen = adcVal;
             for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
@@ -174,9 +156,6 @@ static void loop(void) {
             estimateVcc(adcOpen);
             adcOpenHistoryIndex = (adcOpenHistoryIndex + 1) & (ADC_OPEN_HISTORY_SIZE - 1);
             adcOpenHistory[adcOpenHistoryIndex] = adcVal;
-            //uint8_t idx = adcOpenSampleCounter / ADC_OPEN_SAMPLE_INTERVAL;
-            //uint8_t idx = (adcOpenSampleCounter >> 4) & (ADC_OPEN_HISTORY_SIZE - 1);
-            //adcOpenHistory[idx & (ADC_OPEN_HISTORY_SIZE - 1)] = adcVal;
         }
         setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
         
@@ -186,7 +165,7 @@ static void loop(void) {
         break;
 
     case State::MEAS:
-        meas(adcVal);
+        measureBattery(adcVal);
 
         if (range == VoltRange::OPEN) {
             state = State::OPEN;
@@ -196,8 +175,6 @@ static void loop(void) {
     
     driveLeds();
 }
-
-#define mul32x16(a, b) ((uint32_t)(a) * (b))
 
 static uint16_t readAdc() {
     constexpr uint8_t NUM_SAMPLES = 8;
@@ -236,12 +213,13 @@ static void estimateVcc(uint16_t adcVal) {
     volt3xVf = mul32x16(voltVcc, adc3xVf) / ADC_VCC;
 }
 
-static void meas(uint16_t adcVal) {
+static void measureBattery(uint16_t adcVal) {
     constexpr uint8_t VOLT_DIV = 8;
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
     constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
+
     uint16_t volt = adc2Volt(adcVal);
     uint8_t voltDiv = volt / VOLT_DIV;
     VoltRange newRange;
@@ -297,8 +275,8 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
         break;
     }
     
-    //int16_t level = slope * volt / SLOPE_ONE;
-    uint8_t level = mul32x16(slope, volt) / ONE + 1;
+    uint8_t level = LEVEL_MIN;
+    level += mul32x16(slope, volt) / ONE;
     setLevelToLeds(level);
 }
 
@@ -319,20 +297,15 @@ static void setLevelToLeds(uint8_t level) {
 
 static void driveLeds() {
     uint8_t phase = ledPhase >> LED_PHASE_STEP_PREC;
-    //for (int8_t iled = NUM_LEDS - 1; iled >= 0; iled--) {
     uint8_t iled = NUM_LEDS;
     uint8_t ledMask = 1u << (NUM_LEDS - 1);
-    //uint8_t *rptr = ledValues + NUM_LEDS;
     while (iled-- != 0) {
         if (phase < ledValues[iled]) {
             PORTB = ledMask;
-            //digitalWrite(LED_PINS(iled), HIGH);
         }
         ledMask >>= 1;
         lazyDelayMs(LED_DRIVE_INTERVAL_MS);
-        //_delay_ms(LED_DRIVE_INTERVAL_MS);
         PORTB = 0x00;
-        //digitalWrite(LED_PINS(iled), LOW);
         ledPhase = (ledPhase + 1 < LED_PHASE_PERIOD) ? (ledPhase + 1) : 0;
     }
 }
