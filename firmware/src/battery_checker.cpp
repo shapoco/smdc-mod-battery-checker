@@ -70,7 +70,6 @@ enum class VoltRange : uint8_t {
   BAT_3V7,
   BAT_9V0,
 };
-static VoltRange range;
 
 // 電源電圧
 static uint16_t voltVcc;
@@ -102,7 +101,7 @@ static void loop(void);
 static uint16_t readAdc();
 static uint16_t analogRead();
 static void estimateVcc(uint16_t adcVal);
-static void measureBattery(uint16_t adcVal);
+static VoltRange measureBattery(uint16_t adcVal);
 static uint16_t adc2Volt(uint16_t adcVal);
 static void setVoltageToLeds(VoltRange range, uint16_t volt);
 static void setLevelToLeds(uint8_t level);
@@ -184,9 +183,7 @@ static void loop(void) {
         break;
 
     case State::MEAS:
-        measureBattery(adcVal);
-
-        if (range == VoltRange::OPEN) {
+        if (measureBattery(adcVal) == VoltRange::OPEN) {
             state = State::OPEN;
         }
         break;
@@ -232,7 +229,8 @@ static void estimateVcc(uint16_t adcVal) {
     volt3xVf = mul32ux16u(voltVcc, adc3xVf) / ADC_VCC;
 }
 
-static void measureBattery(uint16_t adcVal) {
+static VoltRange measureBattery(uint16_t adcVal) {
+    // 閾値判定は雑でよいので 8bit に縮めて処理する
     constexpr uint8_t VOLT_DIV = 16;
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
     constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
@@ -242,25 +240,24 @@ static void measureBattery(uint16_t adcVal) {
 
     uint16_t volt = adc2Volt(adcVal);
     uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
-    VoltRange newRange;
-    if (voltDiv < THRESH_OPEN) {
-        newRange = VoltRange::OPEN;
+    VoltRange range;
+    if (voltDiv <= THRESH_OPEN) {
+        range = VoltRange::OPEN;
     }
-    else if (voltDiv < THRESH_1V5) {
-        newRange = VoltRange::BAT_1V5;
+    else if (voltDiv <= THRESH_1V5) {
+        range = VoltRange::BAT_1V5;
     }
-    else if (voltDiv < THRESH_3V0) {
-        newRange = VoltRange::BAT_3V0;
+    else if (voltDiv <= THRESH_3V0) {
+        range = VoltRange::BAT_3V0;
     }
-    else if (voltDiv < THRESH_3V7) {
-        newRange = VoltRange::BAT_3V7;
+    else if (voltDiv <= THRESH_3V7) {
+        range = VoltRange::BAT_3V7;
     }
     else {
-        newRange = VoltRange::BAT_9V0;
+        range = VoltRange::BAT_9V0;
     }
-    range = newRange;
-    
-    setVoltageToLeds(newRange, volt);
+    setVoltageToLeds(range, volt);
+    return range;
 }
 
 static uint16_t adc2Volt(uint16_t adcVal) {
