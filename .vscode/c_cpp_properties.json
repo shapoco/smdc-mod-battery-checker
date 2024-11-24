@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "/usr/lib/avr/include",
+                "${workspaceFolder}/firmware/src"
+            ],
+            "defines": ["__AVR_ATtiny13A__"],
+            "compilerPath": "/usr/bin/avr-g++",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerArgs": ["-O2", "-mmcu=$(MCU)"],
+        }
+    ],
+    "version": 4
+}
