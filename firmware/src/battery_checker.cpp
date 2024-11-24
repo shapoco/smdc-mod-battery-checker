@@ -42,6 +42,10 @@ static constexpr uint16_t VOLT_1V5_MAX = 1.6f * VOLT_ONE;
 static constexpr uint16_t VOLT_3V0_MIN = 2.5f * VOLT_ONE;
 static constexpr uint16_t VOLT_3V0_MAX = 3.1f * VOLT_ONE;
 
+// 3.7V 電池の電圧範囲
+static constexpr uint16_t VOLT_3V7_MIN = 3.6f * VOLT_ONE;
+static constexpr uint16_t VOLT_3V7_MAX = 4.2f * VOLT_ONE;
+
 // 9V 電池の電圧範囲
 static constexpr uint16_t VOLT_9V0_MIN = 7.0f * VOLT_ONE;
 static constexpr uint16_t VOLT_9V0_MAX = 9.0f * VOLT_ONE;
@@ -76,6 +80,7 @@ enum class VoltRange : uint8_t {
   OPEN,
   BAT_1V5,
   BAT_3V0,
+  BAT_3V7,
   BAT_9V0,
 };
 static VoltRange range;
@@ -158,7 +163,7 @@ static void loop(void) {
             state = State::OPEN;
         }
         else {
-            setLevelToLeds(((tickCount & 0x1ff) < 0x100) ? LEVEL_MAX : 0);
+            setLevelToLeds((tickCount & 0x200u) ? LEVEL_MAX : 0);
         }
         break;
 
@@ -259,16 +264,25 @@ static void estimateVcc(uint16_t adcVal) {
 }
 
 static void meas(uint16_t adcVal) {
+    constexpr uint8_t VOLT_DIV = 8;
+    constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
+    constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
+    constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
+    constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     uint16_t volt = adc2Volt(adcVal);
+    uint8_t voltDiv = volt / VOLT_DIV;
     VoltRange newRange;
-    if (volt < VOLT_OPEN_MAX) {
+    if (voltDiv < THRESH_OPEN) {
         newRange = VoltRange::OPEN;
     }
-    else if (volt < (VOLT_1V5_MAX + VOLT_3V0_MIN) / 2) {
+    else if (voltDiv < THRESH_1V5) {
         newRange = VoltRange::BAT_1V5;
     }
-    else if (volt < (VOLT_3V0_MAX + VOLT_9V0_MIN) / 2) {
+    else if (voltDiv < THRESH_3V0) {
         newRange = VoltRange::BAT_3V0;
+    }
+    else if (voltDiv < THRESH_3V7) {
+        newRange = VoltRange::BAT_3V7;
     }
     else {
         newRange = VoltRange::BAT_9V0;
@@ -299,6 +313,11 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
         volt = unoffsetClip16(VOLT_3V0_MIN, VOLT_3V0_MAX - VOLT_3V0_MIN, volt);
         break;
 
+    case VoltRange::BAT_3V7:
+        slope = ONE * LEVEL_RANGE / (VOLT_3V7_MAX - VOLT_3V7_MIN);
+        volt = unoffsetClip16(VOLT_3V0_MIN, VOLT_3V7_MAX - VOLT_3V7_MIN, volt);
+        break;
+
     case VoltRange::BAT_9V0:
         slope = ONE * LEVEL_RANGE / (VOLT_9V0_MAX - VOLT_9V0_MIN);
         volt = unoffsetClip16(VOLT_9V0_MIN, VOLT_9V0_MAX - VOLT_9V0_MIN, volt);
@@ -313,15 +332,14 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
 static void setLevelToLeds(uint8_t level) {
     int8_t tmp = level;
     for (uint8_t iled = 0; iled < NUM_LEDS; iled++) {
-        if (tmp < 0) {
-            ledValues[iled] = 0;
+        int8_t val = tmp;
+        if (val < 0) {
+            val = 0;
         }
-        else if (tmp < LEVEL_STEP) {
-            ledValues[iled] = tmp;
+        else if (val >= LEVEL_STEP) {
+            val = LEVEL_STEP;
         }
-        else {
-            ledValues[iled] = LEVEL_STEP;
-        }
+        ledValues[iled] = val;
         tmp -= LEVEL_STEP;
     }
 }
@@ -343,12 +361,12 @@ static void driveLeds() {
 
 // なんとなく 1ms くらいのディレイ
 static void lazyDelayMs(uint8_t duration) {
+    tickCount += duration;
     while (duration-- > 0) {
         for (uint8_t i = 0; i < 100; i++) {
             asm volatile ("nop");
         }
     }
-    tickCount += duration;
 }
 
 static uint16_t unoffsetClip16(uint16_t min, uint16_t range, uint16_t val) {
