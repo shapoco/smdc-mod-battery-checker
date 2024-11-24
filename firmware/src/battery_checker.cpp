@@ -77,6 +77,12 @@ static uint16_t voltVcc;
 // 1N4148W の Vf * 3
 static uint16_t volt3xVf;
 
+// 電圧レンジヒストリ
+static constexpr uint8_t RANGE_HISTORY_SIZE = 2;
+static VoltRange rangeHistory[RANGE_HISTORY_SIZE];
+static uint8_t rangeHistoryIndex = 0;
+static VoltRange lastRange = VoltRange::OPEN;
+
 // 各 LED のレベル値
 static uint8_t ledValues[NUM_LEDS];
 
@@ -88,14 +94,17 @@ static_assert(0 < LED_PHASE_STEP_CNTR_PERIOD && LED_PHASE_STEP_CNTR_PERIOD <= 25
 static uint8_t ledPhaseStepCntr = 0;
 static uint8_t ledPhase = 0;
 
-static uint16_t tickCount = 0;
+// 起動時の Vcc 電圧表示
+static bool startup = true;
+
+// 経過時間(LED_BLINK_PERIOD_MS 単位)
+static uint8_t tickCount = 0;
 
 static void loop(void);
 static uint16_t readAdcAverage();
 static uint16_t readAdc();
 static void estimateVcc(uint16_t adcVal);
-static uint16_t adc2Volt(uint16_t adcVal);
-static VoltRange volt2Range(uint16_t volt);
+static void adc2Volt(uint16_t adcVal);
 static void setVoltageToLeds(VoltRange range, uint16_t volt);
 static void setLevelToLeds(uint8_t level);
 static void driveLeds();
@@ -149,28 +158,15 @@ static void loop(void) {
             // 初期 Vcc 電圧推定
             estimateVcc(adcVal);
             vccDetected = true;
+            tickCount = 0;
+            ledPhase = 0;
         }
         else {
-            setLevelToLeds((tickCount & 0x200u) ? LEVEL_MAX : 0);
+            setLevelToLeds(ledPhase >= LEVEL_STEP / 2 ? 0 : LEVEL_MAX);
         }
     }
     else { // Vcc 電圧推定後
-        uint16_t volt = adc2Volt(adcVal); // 電池電圧の推定
-        VoltRange range = volt2Range(volt); // 電圧レンジの推定
-        
-        if (range != VoltRange::OPEN) { // 電池接続時
-            // 電圧表示
-            setVoltageToLeds(range, volt);
-        }
-        else { // 開放時
-            // Vcc 電圧や温度変化で基準電圧が変動するので定期的に更新する
-            adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
-            if (adcOpenSampleCounter == 0) {
-                estimateVcc(adcVal);
-            }
-
-            setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
-        }
+        adc2Volt(adcVal); // 電池電圧の推定
     }
     
     driveLeds();
@@ -224,40 +220,82 @@ static void estimateVcc(uint16_t adcVal) {
     volt3xVf = mul32ux16u(voltVcc, adcOpen) / ADC_VCC;
 }
 
-static VoltRange volt2Range(uint16_t volt) {
-    // 閾値判定は雑でよいので 8bit に縮めて処理する
+static void adc2Volt(uint16_t adcVal) {
+    constexpr uint8_t EXTRA_PREC = (1 << 4);
+    uint16_t volt = mul32ux16u(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
+    volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
+    volt = mul32ux16u(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
+    
+    // レンジ判定 (雑でよいので 8bit に縮めて処理する)
     constexpr uint8_t VOLT_DIV = 16;
     constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
     constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
     static_assert(10 * VOLT_ONE / VOLT_DIV < 256);
-
     uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
-    VoltRange newRange;
+    VoltRange range;
     if (voltDiv <= THRESH_OPEN) {
-        newRange = VoltRange::OPEN;
+        range = VoltRange::OPEN;
     }
     else if (voltDiv <= THRESH_1V5) {
-        newRange = VoltRange::BAT_1V5;
+        range = VoltRange::BAT_1V5;
     }
     else if (voltDiv <= THRESH_3V0) {
-        newRange = VoltRange::BAT_3V0;
+        range = VoltRange::BAT_3V0;
     }
     else if (voltDiv <= THRESH_3V7) {
-        newRange = VoltRange::BAT_3V7;
+        range = VoltRange::BAT_3V7;
     }
     else {
-        newRange = VoltRange::BAT_9V0;
+        range = VoltRange::BAT_9V0;
     }
-    return newRange;
-}
 
-static uint16_t adc2Volt(uint16_t adcVal) {
-    constexpr uint8_t EXTRA_PREC = (1 << 4);
-    uint16_t volt = mul32ux16u(adcVal, voltVcc * EXTRA_PREC) / ADC_VCC;
-    volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
-    return mul32ux16u(volt, RDIV_HI + RDIV_LO) / (RDIV_LO * EXTRA_PREC);
+    // チャタリング除去
+    bool stable = true;
+    
+    for (uint8_t i = 0; i < RANGE_HISTORY_SIZE; i++) {
+        stable &= (range == rangeHistory[i]);
+    }
+    rangeHistory[rangeHistoryIndex] = range;
+    rangeHistoryIndex = CYCLIC_INCR_8U(rangeHistoryIndex, RANGE_HISTORY_SIZE);
+
+    if (!stable) return;
+    
+    // レンジの変化検出
+    if (range != lastRange) {
+        ledPhase = 0;
+        tickCount = 0;
+    }
+    lastRange = range;
+
+    // 表示の更新
+    if (range == VoltRange::OPEN) { // 電池未接続時
+        // Vcc 電圧や温度変化で基準電圧が変動するので定期的に更新する
+        adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
+        if (adcOpenSampleCounter == 0) {
+            estimateVcc(adcVal);
+        }
+
+        constexpr uint8_t STARTUP_TIME_TICK = 3000 / LED_BLINK_PERIOD_MS;
+        if (startup && tickCount < STARTUP_TIME_TICK) {
+            // Vcc 電圧の表示
+            setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
+        }
+    }
+    else { // 電池接続時
+        startup = false;
+        constexpr uint8_t RANGE_DISP_TICK = 1000 / LED_BLINK_PERIOD_MS;
+        if (tickCount < RANGE_DISP_TICK) {
+            // 最初は電圧レンジを表示
+            setLevelToLeds(0);
+            ledValues[(int)range] = LEVEL_STEP;
+        }
+        else {
+            // 電池電圧表示
+            setVoltageToLeds(range, volt);
+        }
+    }
 }
 
 static void setVoltageToLeds(VoltRange range, uint16_t volt) {
@@ -310,6 +348,9 @@ static void driveLeds() {
     uint8_t phase = ledPhase;
     if (ledPhaseStepCntr == 0) {
         ledPhase = CYCLIC_INCR_8U(phase, LEVEL_STEP);
+        if (ledPhase == 0 && tickCount < 255) {
+            tickCount++;
+        }
     }
 
     uint8_t iled = NUM_LEDS;
@@ -326,7 +367,6 @@ static void driveLeds() {
 
 // なんとなく 1ms くらいのディレイ
 static void lazyDelayMs(uint8_t duration) {
-    tickCount += duration;
     while (duration-- > 0) {
         for (uint8_t i = 0; i < 100; i++) {
             asm volatile ("nop");
