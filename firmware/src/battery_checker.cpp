@@ -139,9 +139,6 @@ int main(void) {
     // [1:0] MUX   = 0    ADC0 (PB5) 選択
     DIDR0 |= _BV(ADC0D); // ADC0 のデジタル入力無効化
 
-    // 適当に電源電圧が安定するのを待つ
-    lazyDelayMs(100);
-
     // ループ処理開始
     while(true) loop();
 }
