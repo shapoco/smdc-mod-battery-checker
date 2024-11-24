@@ -24,15 +24,15 @@ static constexpr uint8_t LEVEL_MAX = LEVEL_MIN + LEVEL_RANGE - 1;
 static constexpr uint16_t ADC_VCC = 1024;
 
 // プローブ開放状態の ADC 値範囲
-static constexpr uint16_t ADC_OPEN_MIN = 650; // VOLT_VCC_MAX に対応
-static constexpr uint16_t ADC_OPEN_MAX = 774; // VOLT_VCC_MIN に対応
+static constexpr uint16_t ADC_3XVF_MIN = 650; // VOLT_VCC_MAX に対応
+static constexpr uint16_t ADC_3XVF_MAX = 774; // VOLT_VCC_MIN に対応
 
 // VCC の電圧範囲
-static constexpr uint16_t VOLT_VCC_MIN = 2.5f * VOLT_ONE; // ADC_OPEN_MAX に対応
-static constexpr uint16_t VOLT_VCC_MAX = 3.2f * VOLT_ONE; // ADC_OPEN_MIN に対応
+static constexpr uint16_t VOLT_VCC_MIN = 2.5f * VOLT_ONE; // ADC_3XVF_MAX に対応
+static constexpr uint16_t VOLT_VCC_MAX = 3.2f * VOLT_ONE; // ADC_3XVF_MIN に対応
 
 // プローブ開放判定の閾値電圧
-static constexpr uint16_t VOLT_OPEN_MAX = 0.1f * VOLT_ONE;
+static constexpr uint16_t VOLT_OPEN_MAX = 0.2f * VOLT_ONE;
 
 // 1.5V 電池の電圧範囲
 static constexpr uint16_t VOLT_1V5_MIN = 1.0f * VOLT_ONE;
@@ -64,11 +64,11 @@ enum class VoltRange : uint8_t {
 };
 
 // 開放時の ADC 値ヒストリ (Vcc 電圧推定用)
-static constexpr uint8_t ADC_OPEN_SAMPLE_INTERVAL = 128;
-static constexpr uint8_t ADC_OPEN_HISTORY_SIZE = 2;
-static uint8_t adcOpenSampleCounter = 0;
-static uint16_t adcOpenHistory[ADC_OPEN_HISTORY_SIZE];
-static uint8_t adcOpenHistoryIndex = 0;
+static constexpr uint8_t ADC_3XVF_SAMPLE_INTERVAL = 128;
+static constexpr uint8_t ADC_3XVF_HISTORY_SIZE = 2;
+static uint8_t adc3xVfSampleCounter = 0;
+static uint16_t adc3xVfHistory[ADC_3XVF_HISTORY_SIZE];
+static uint8_t adc3xVfHistoryIndex = 0;
 
 // 電源電圧
 static bool vccDetected = false;
@@ -98,7 +98,8 @@ static uint8_t ledPhase = 0;
 static bool startup = true;
 
 // 経過時間(LED_BLINK_PERIOD_MS 単位)
-static uint8_t tickCount = 0;
+static uint8_t tickCountMaxHold = 0;
+static uint8_t tickCountFreeRun = 0;
 
 static void loop(void);
 static uint16_t readAdcAverage();
@@ -150,15 +151,16 @@ static void loop(void) {
     uint16_t adcVal = readAdcAverage();
 
     if (!vccDetected) { // Vcc 電圧推定前
-        if (ADC_OPEN_MIN - 50 <= adcVal && adcVal < ADC_OPEN_MAX + 50) {
+        if (ADC_3XVF_MIN - 50 <= adcVal && adcVal < ADC_3XVF_MAX + 50) {
             // 初回測定値でヒストリを埋める
-            for(int i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
-                adcOpenHistory[i] = adcVal;
+            for(int i = 0; i < ADC_3XVF_HISTORY_SIZE; i++) {
+                adc3xVfHistory[i] = adcVal;
             }
             // 初期 Vcc 電圧推定
             estimateVcc(adcVal);
             vccDetected = true;
-            tickCount = 0;
+            tickCountMaxHold = 0;
+            tickCountFreeRun = 0;
             ledPhase = 0;
         }
         else {
@@ -199,21 +201,21 @@ static uint16_t readAdc() {
 static void estimateVcc(uint16_t adcVal) {
     // ヒストリの最低値
     uint16_t adcOpen = adcVal;
-    for(uint8_t i = 0; i < ADC_OPEN_HISTORY_SIZE; i++) {
-        adcOpen = MIN(adcOpenHistory[i], adcOpen);
+    for(uint8_t i = 0; i < ADC_3XVF_HISTORY_SIZE; i++) {
+        adcOpen = MIN(adc3xVfHistory[i], adcOpen);
     }
 
     // ヒストリの更新
-    adcOpenHistoryIndex = CYCLIC_INCR_8U(adcOpenHistoryIndex, ADC_OPEN_HISTORY_SIZE);
-    adcOpenHistory[adcOpenHistoryIndex] = adcVal;
+    adc3xVfHistoryIndex = CYCLIC_INCR_8U(adc3xVfHistoryIndex, ADC_3XVF_HISTORY_SIZE);
+    adc3xVfHistory[adc3xVfHistoryIndex] = adcVal;
 
     // Vcc 電圧推定
     constexpr uint16_t ONE = 1u << 8;
-    constexpr uint32_t SLOPE = (uint32_t)ONE * (VOLT_VCC_MAX - VOLT_VCC_MIN) / (ADC_OPEN_MAX - ADC_OPEN_MIN);
+    constexpr uint32_t SLOPE = (uint32_t)ONE * (VOLT_VCC_MAX - VOLT_VCC_MIN) / (ADC_3XVF_MAX - ADC_3XVF_MIN);
     uint16_t tmp = adcOpen;
-    if (tmp > ADC_OPEN_MAX) tmp = 0;
-    else if (tmp < ADC_OPEN_MIN) tmp = (ADC_OPEN_MAX - ADC_OPEN_MIN);
-    else tmp = ADC_OPEN_MAX - tmp;
+    if (tmp > ADC_3XVF_MAX) tmp = 0;
+    else if (tmp < ADC_3XVF_MIN) tmp = (ADC_3XVF_MAX - ADC_3XVF_MIN);
+    else tmp = ADC_3XVF_MAX - tmp;
     voltVcc = (uint16_t)(mul32ux16u(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
 
     // 1N4148W の Vf * 3 の推定
@@ -222,23 +224,19 @@ static void estimateVcc(uint16_t adcVal) {
 
 static void adc2Volt(uint16_t adcVal) {
     // ADC値から電圧へ変換
-    // (adcVal * voltVcc / RL / ADC_VCC - volt3xVf / RL) * (RH + RL)
     uint16_t volt = mul32ux16u(adcVal, voltVcc) / ADC_VCC;
     volt = (volt >= volt3xVf) ? (volt - volt3xVf) : 0;
-    //volt = unoffsetClip16u(volt3xVf * EXTRA_PREC, (voltVcc - volt3xVf) * EXTRA_PREC, volt);
     volt = mul32ux16u(volt, RDIV_HI + RDIV_LO) / RDIV_LO;
-    //volt = volt * (RDIV_HI + RDIV_LO) / RDIV_LO;
 
     // レンジ判定 (雑でよいので 8bit に縮めて処理する)
     constexpr uint16_t VOLT_DIV = 1u << (VOLT_PREC - 4);
-    constexpr uint8_t THRESH_OPEN = (VOLT_OPEN_MAX + VOLT_DIV - 1) / VOLT_DIV;
-    constexpr uint8_t THRESH_1V5 = (VOLT_1V5_MAX + VOLT_3V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
-    constexpr uint8_t THRESH_3V0 = (VOLT_3V0_MAX + VOLT_3V7_MIN + VOLT_DIV) / (2 * VOLT_DIV);
-    constexpr uint8_t THRESH_3V7 = (VOLT_3V7_MAX + VOLT_9V0_MIN + VOLT_DIV) / (2 * VOLT_DIV);
+    constexpr uint8_t THRESH_1V5 = ROUND_DIV(VOLT_1V5_MAX + VOLT_3V0_MIN, 2 * VOLT_DIV);
+    constexpr uint8_t THRESH_3V0 = ROUND_DIV(VOLT_3V0_MAX + VOLT_3V7_MIN, 2 * VOLT_DIV);
+    constexpr uint8_t THRESH_3V7 = ROUND_DIV(VOLT_3V7_MAX + VOLT_9V0_MIN, 2 * VOLT_DIV);
     static_assert((15 * VOLT_ONE + VOLT_DIV / 2) / VOLT_DIV < 256);
     uint8_t voltDiv = ROUND_DIV(volt, VOLT_DIV);
     VoltRange range;
-    if (voltDiv <= THRESH_OPEN) {
+    if (volt < VOLT_OPEN_MAX) {
         range = VoltRange::OPEN;
     }
     else if (voltDiv <= THRESH_1V5) {
@@ -256,40 +254,47 @@ static void adc2Volt(uint16_t adcVal) {
 
     // チャタリング除去
     bool stable = true;
-    
     for (uint8_t i = 0; i < RANGE_HISTORY_SIZE; i++) {
         stable &= (range == rangeHistory[i]);
     }
     rangeHistory[rangeHistoryIndex] = range;
     rangeHistoryIndex = CYCLIC_INCR_8U(rangeHistoryIndex, RANGE_HISTORY_SIZE);
-
     if (!stable) return;
     
     // レンジの変化検出
     if (range != lastRange) {
         ledPhase = 0;
-        tickCount = 0;
+        tickCountMaxHold = 0;
+        tickCountFreeRun = 0;
     }
     lastRange = range;
 
     // 表示の更新
     if (range == VoltRange::OPEN) { // 電池未接続時
         // Vcc 電圧や温度変化で基準電圧が変動するので定期的に更新する
-        adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
-        if (adcOpenSampleCounter == 0) {
+        adc3xVfSampleCounter = CYCLIC_INCR_8U(adc3xVfSampleCounter, ADC_3XVF_SAMPLE_INTERVAL);
+        if (adc3xVfSampleCounter == 0) {
             estimateVcc(adcVal);
         }
 
         constexpr uint8_t STARTUP_TIME_TICK = 3000 / LED_BLINK_PERIOD_MS;
-        if (startup && tickCount < STARTUP_TIME_TICK) {
-            // Vcc 電圧の表示
+        if (startup && tickCountMaxHold < STARTUP_TIME_TICK) {
+            // 起動後は Vcc 電圧を表示
             setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
+        }
+        else {
+            startup = false;
+            // 待機アニメーション
+            setLevelToLeds(0);
+            uint8_t p = tickCountFreeRun & 0x7;
+            if (p & 0x4) p = 8 - p;
+            ledValues[p] = LEVEL_STEP;
         }
     }
     else { // 電池接続時
         startup = false;
         constexpr uint8_t RANGE_DISP_TICK = 1000 / LED_BLINK_PERIOD_MS;
-        if (tickCount < RANGE_DISP_TICK) {
+        if (tickCountMaxHold < RANGE_DISP_TICK) {
             // 最初は電圧レンジを表示
             setLevelToLeds(0);
             ledValues[(int)range] = LEVEL_STEP;
@@ -343,7 +348,7 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
     
     volt = unoffsetClip16u(vmin, vrange, volt);
     uint8_t level = LEVEL_MIN;
-    level += volt * slope / ONE;
+    level += mul32ux16u(slope, volt) / ONE;
     setLevelToLeds(level);
 }
 
@@ -367,9 +372,10 @@ static void driveLeds() {
     uint8_t phase = ledPhase;
     if (ledPhaseStepCntr == 0) {
         ledPhase = CYCLIC_INCR_8U(phase, LEVEL_STEP);
-        if (ledPhase == 0 && tickCount < 255) {
-            tickCount++;
+        if (ledPhase == 0 && tickCountMaxHold < 255) {
+            tickCountMaxHold++;
         }
+        tickCountFreeRun++;
     }
 
     uint8_t iled = NUM_LEDS;
