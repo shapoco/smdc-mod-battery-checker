@@ -118,7 +118,7 @@ static uint8_t cyclicIncr8u(uint8_t x, uint8_t period);
 #define CYCLIC_INCR_8U(x, period) \
     (IS_POW_OF_2_16U(period) ? (((x) + 1) & ((period) - 1)) : cyclicIncr8u((x), (period)))
 
-#define mul32ux16u(a, b) ((uint32_t)(a) * (b))
+#define mul32ux16u(a, b) ((uint32_t)(a) * (uint16_t)(b))
 
 int main(void) {
     // GPIO 設定
@@ -164,10 +164,7 @@ static void loop(void) {
 
     //case State::MEAS:
     default:
-        if (measureBattery(adcVal) != VoltRange::OPEN) {
-            state = State::MEAS;
-        }
-        else {
+        if (measureBattery(adcVal) == VoltRange::OPEN) {
             // 電池電圧や温度変化で基準電圧が変動するので定期的に更新する
             adcOpenSampleCounter = CYCLIC_INCR_8U(adcOpenSampleCounter, ADC_OPEN_SAMPLE_INTERVAL);
             if (adcOpenSampleCounter == 0) {
