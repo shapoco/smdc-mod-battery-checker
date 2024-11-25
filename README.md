@@ -18,6 +18,8 @@
 
 ## ビルド手順
 
+既に開発環境をお持ちであればそれを使って頂いてかまいません。
+
 1. WSL に `gcc-avr`、`avr-libc`、`binutils-avr` をインストールします。
     - 参考: [avr-gcc と make だけで C/C++ AVR 環境構築 (ATmega328P) #Make - Qiita](https://qiita.com/BerandaMegane/items/740c75393b8fbfde5bed)
 2. WSL 内で本リポジトリを clone し、`firmware/` の配下で `make` を実行します。
@@ -25,9 +27,12 @@
 
 ## 書き込み手順
 
+既に書き込み用のケーブルやツールをお持ちであればそれを使って頂いてかまいません。
+
 1. Windows 環境に Microchip Studio をインストールします。
     - 書き込みに `C:\Program Files (x86)\Atmel\Studio\7.0\atbackend\atprogram.exe` を使用します。
 2. AVRISP mkII を SMD Challenge 基板に接続します。
+    - 環境によって `libusb-win32` のインストールが必要です。
 3. WSL 内でリポジトリ配下の `firmware/` に移動します。
 4. `make fuse-write` でヒューズを書き込みます。
 5. `make flash-write` でプログラムを書き込みます。
