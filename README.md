@@ -12,6 +12,26 @@
 
 ![回路図](images/circuit.png)
 
+## ヒューズ設定
+
+600kHz で動作するように CKSEL=0b01 (4.8MHz)、CKDIV8=0b0 (クロックディバイダ有効) に設定しています。具体的な設定値は [fuse-write.ps1](firmware/tools/atprogram-win/fuse-write.ps1) を参照ください。
+
+## ビルド手順
+
+1. WSL に `gcc-avr`、`avr-libc`、`binutils-avr` をインストールします。
+    - 参考: [avr-gcc と make だけで C/C++ AVR 環境構築 (ATmega328P) #Make - Qiita](https://qiita.com/BerandaMegane/items/740c75393b8fbfde5bed)
+2. WSL 内で本リポジトリを clone し、`firmware/` の配下で `make` を実行します。
+    - `firmware/build/battery_checker.elf` が生成されます。
+
+## 書き込み手順
+
+1. Windows 環境に Microchip Studio をインストールします。
+    - 書き込みに `C:\Program Files (x86)\Atmel\Studio\7.0\atbackend\atprogram.exe` を使用します。
+2. AVRISP mkII を SMD Challenge 基板に接続します。
+3. WSL 内でリポジトリ配下の `firmware/` に移動します。
+4. `make fuse-write` でヒューズを書き込みます。
+5. `make flash-write` でプログラムを書き込みます。
+
 ## 仕組み
 
 空き端子となっていた PB5 (RESET) に追加の回路を接続し、PB5/RESET と兼用の ADC0 を使って電圧を測定します。

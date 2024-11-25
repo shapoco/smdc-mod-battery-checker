@@ -4,7 +4,8 @@
     -d attiny13a `
     write `
     --fuses `
-    --values 69FD
+    --values 69FD `
+    --verify
 
 # Fuse High Byte [7:0]
 #   [7:5]   Reserved                                            0b111
