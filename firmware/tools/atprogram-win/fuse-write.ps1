@@ -39,11 +39,3 @@
 #   01 Calibrated internal 4.8 MHz oscillator
 #   10 Calibrated internal 9.6 MHz oscillator
 #   11 Internal 128kHz oscillator
-
-# powershell.exe bin/fuse-read.ps1
-# Firmware check OK
-# :020000002AFDD7
-# :00000001FF
-# 
-# :01000000FF00
-# :00000001FF
