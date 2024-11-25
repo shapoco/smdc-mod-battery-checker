@@ -97,31 +97,36 @@ static uint8_t ledPhase = 0;
 // 起動時の Vcc 電圧表示
 static bool startup = true;
 
-// 経過時間(LED_BLINK_PERIOD_MS 単位)
+// 経過時間 (LED_BLINK_PERIOD_MS 単位, Max Hold)
 static uint8_t tickCountMaxHold = 0;
+
+// フリーランカウンタ (アニメーション用)
 static uint8_t tickCountFreeRun = 0;
 
 static void loop(void);
-static uint16_t readAdcAverage();
-static uint16_t readAdc();
+static void adc2Leds(uint16_t adcVal);
 static void estimateVcc(uint16_t adcVal);
-static void adc2Volt(uint16_t adcVal);
-static void setVoltageToLeds(VoltRange range, uint16_t volt);
-static void setLevelToLeds(uint8_t level);
-static void driveLeds();
+static uint16_t readAdcAverage(void);
+static uint16_t readAdc(void);
+static void volt2Leds(VoltRange range, uint16_t volt);
+static void level2Leds(uint8_t level);
+static void driveLeds(void);
 static void lazyDelayMs(uint8_t duration);
 static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val);
 static uint8_t cyclicIncr8u(uint8_t x, uint8_t period);
 
+// x が 2 のべき乗か否か
 #define IS_POW_OF_2_16U(x) \
-    ((x) == (1 <<  0) || (x) == (1 <<  1) || (x) == (1 <<  2) || (x) == (1 <<  3) || \
-     (x) == (1 <<  4) || (x) == (1 <<  5) || (x) == (1 <<  6) || (x) == (1 <<  7) || \
-     (x) == (1 <<  8) || (x) == (1 <<  9) || (x) == (1 << 10) || (x) == (1 << 11) || \
-     (x) == (1 << 12) || (x) == (1 << 13) || (x) == (1 << 14) || (x) == (1 << 15))
+    ((x) == (1u <<  0) || (x) == (1u <<  1) || (x) == (1u <<  2) || (x) == (1u <<  3) || \
+     (x) == (1u <<  4) || (x) == (1u <<  5) || (x) == (1u <<  6) || (x) == (1u <<  7) || \
+     (x) == (1u <<  8) || (x) == (1u <<  9) || (x) == (1u << 10) || (x) == (1u << 11) || \
+     (x) == (1u << 12) || (x) == (1u << 13) || (x) == (1u << 14) || (x) == (1u << 15))
 
+// x を 0 ～ (period-1) の間でサイクリックにインクリメントする
 #define CYCLIC_INCR_8U(x, period) \
     (IS_POW_OF_2_16U(period) ? (((x) + 1) & ((period) - 1)) : cyclicIncr8u((x), (period)))
 
+// 32bit x 16bit の乗算
 #define mul32ux16u(a, b) ((uint32_t)(a) * (uint16_t)(b))
 
 int main(void) {
@@ -164,65 +169,18 @@ static void loop(void) {
             ledPhase = 0;
         }
         else {
-            setLevelToLeds(ledPhase >= LEVEL_STEP / 2 ? 0 : LEVEL_MAX);
+            level2Leds(ledPhase >= LEVEL_STEP / 2 ? 0 : LEVEL_MAX);
         }
     }
     else { // Vcc 電圧推定後
-        adc2Volt(adcVal); // 電池電圧の推定
+        adc2Leds(adcVal);
     }
     
     driveLeds();
 }
 
-static uint16_t readAdcAverage() {
-    constexpr uint8_t NUM_SAMPLES = 8;
-#if 0
-    // ダイナミック点灯を PB4-->PB0 の順にしたので PB4 は十分に長い時間 Low になっているはず
-    PORTB = 0x00;
-    lazyDelayMs(1);
-#endif
-    readAdc(); // 読み捨て
-    uint16_t adcVal = 0;
-    for (uint8_t i = 0; i < NUM_SAMPLES; i++) {
-        adcVal += readAdc();
-    }
-    return ROUND_DIV(adcVal, NUM_SAMPLES);
-}
-
-static uint16_t readAdc() {
-    ADCSRA |= _BV(ADSC); // ADC開始
-    loop_until_bit_is_set(ADCSRA, ADIF); // ADC完了待ち
-    uint8_t lo = ADCL; // Low 側から先に読むこと
-    uint16_t hi = ((uint16_t)ADCH) << 8;
-    return hi | lo;
-}
-
-// 1N4148W の Vf * 3 から Vcc 電圧を推定
-static void estimateVcc(uint16_t adcVal) {
-    // ヒストリの最低値
-    uint16_t adcOpen = adcVal;
-    for(uint8_t i = 0; i < ADC_3XVF_HISTORY_SIZE; i++) {
-        adcOpen = MIN(adc3xVfHistory[i], adcOpen);
-    }
-
-    // ヒストリの更新
-    adc3xVfHistoryIndex = CYCLIC_INCR_8U(adc3xVfHistoryIndex, ADC_3XVF_HISTORY_SIZE);
-    adc3xVfHistory[adc3xVfHistoryIndex] = adcVal;
-
-    // Vcc 電圧推定
-    constexpr uint16_t ONE = 1u << 8;
-    constexpr uint32_t SLOPE = (uint32_t)ONE * (VOLT_VCC_MAX - VOLT_VCC_MIN) / (ADC_3XVF_MAX - ADC_3XVF_MIN);
-    uint16_t tmp = adcOpen;
-    if (tmp > ADC_3XVF_MAX) tmp = 0;
-    else if (tmp < ADC_3XVF_MIN) tmp = (ADC_3XVF_MAX - ADC_3XVF_MIN);
-    else tmp = ADC_3XVF_MAX - tmp;
-    voltVcc = (uint16_t)(mul32ux16u(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
-
-    // 1N4148W の Vf * 3 の推定
-    volt3xVf = mul32ux16u(voltVcc, adcOpen) / ADC_VCC;
-}
-
-static void adc2Volt(uint16_t adcVal) {
+// ADC 値から電圧に変換し LED に反映する
+static void adc2Leds(uint16_t adcVal) {
     // ADC値から電圧へ変換
     uint16_t volt = mul32ux16u(adcVal, voltVcc) / ADC_VCC;
     volt = (volt >= volt3xVf) ? (volt - volt3xVf) : 0;
@@ -280,12 +238,12 @@ static void adc2Volt(uint16_t adcVal) {
         constexpr uint8_t STARTUP_TIME_TICK = 3000 / LED_BLINK_PERIOD_MS;
         if (startup && tickCountMaxHold < STARTUP_TIME_TICK) {
             // 起動後は Vcc 電圧を表示
-            setVoltageToLeds(VoltRange::BAT_3V0, voltVcc);
+            volt2Leds(VoltRange::BAT_3V0, voltVcc);
         }
         else {
             startup = false;
             // 待機アニメーション
-            setLevelToLeds(0);
+            level2Leds(0);
             uint8_t p = tickCountFreeRun & 0x7;
             if (p & 0x4) p = 8 - p;
             ledValues[p] = LEVEL_STEP;
@@ -296,17 +254,68 @@ static void adc2Volt(uint16_t adcVal) {
         constexpr uint8_t RANGE_DISP_TICK = 1000 / LED_BLINK_PERIOD_MS;
         if (tickCountMaxHold < RANGE_DISP_TICK) {
             // 最初は電圧レンジを表示
-            setLevelToLeds(0);
+            level2Leds(0);
             ledValues[(int)range] = LEVEL_STEP;
         }
         else {
             // 電池電圧表示
-            setVoltageToLeds(range, volt);
+            volt2Leds(range, volt);
         }
     }
 }
 
-static void setVoltageToLeds(VoltRange range, uint16_t volt) {
+// 1N4148W の Vf * 3 から Vcc 電圧を推定
+static void estimateVcc(uint16_t adcVal) {
+    // ヒストリの最低値
+    uint16_t adcOpen = adcVal;
+    for(uint8_t i = 0; i < ADC_3XVF_HISTORY_SIZE; i++) {
+        adcOpen = MIN(adc3xVfHistory[i], adcOpen);
+    }
+
+    // ヒストリの更新
+    adc3xVfHistoryIndex = CYCLIC_INCR_8U(adc3xVfHistoryIndex, ADC_3XVF_HISTORY_SIZE);
+    adc3xVfHistory[adc3xVfHistoryIndex] = adcVal;
+
+    // Vcc 電圧推定
+    constexpr uint16_t ONE = 1u << 8;
+    constexpr uint32_t SLOPE = (uint32_t)ONE * (VOLT_VCC_MAX - VOLT_VCC_MIN) / (ADC_3XVF_MAX - ADC_3XVF_MIN);
+    uint16_t tmp = adcOpen;
+    if (tmp > ADC_3XVF_MAX) tmp = 0;
+    else if (tmp < ADC_3XVF_MIN) tmp = (ADC_3XVF_MAX - ADC_3XVF_MIN);
+    else tmp = ADC_3XVF_MAX - tmp;
+    voltVcc = (uint16_t)(mul32ux16u(SLOPE, tmp) / ONE) + VOLT_VCC_MIN;
+
+    // 1N4148W の Vf * 3 の推定
+    volt3xVf = mul32ux16u(voltVcc, adcOpen) / ADC_VCC;
+}
+
+// ADC 値を何回か読み取って平均を返す
+static uint16_t readAdcAverage(void) {
+    constexpr uint8_t NUM_SAMPLES = 8;
+#if 0
+    // ダイナミック点灯を PB4-->PB0 の順にしたので PB4 は十分に長い時間 Low になっているはず
+    PORTB = 0x00;
+    lazyDelayMs(1);
+#endif
+    readAdc(); // 読み捨て
+    uint16_t adcVal = 0;
+    for (uint8_t i = 0; i < NUM_SAMPLES; i++) {
+        adcVal += readAdc();
+    }
+    return ROUND_DIV(adcVal, NUM_SAMPLES);
+}
+
+// ADC 値を 1 回読み取る
+static uint16_t readAdc(void) {
+    ADCSRA |= _BV(ADSC); // ADC開始
+    loop_until_bit_is_set(ADCSRA, ADIF); // ADC完了待ち
+    uint8_t lo = ADCL; // Low 側から先に読むこと
+    uint16_t hi = ((uint16_t)ADCH) << 8;
+    return hi | lo;
+}
+
+// 電圧値を LED に反映
+static void volt2Leds(VoltRange range, uint16_t volt) {
     constexpr uint16_t ONE = VOLT_ONE;
     constexpr uint16_t RANGE_1V5  = VOLT_1V5_MAX - VOLT_1V5_MIN;
     constexpr uint16_t RANGE_3V0  = VOLT_3V0_MAX - VOLT_3V0_MIN;
@@ -349,10 +358,10 @@ static void setVoltageToLeds(VoltRange range, uint16_t volt) {
     volt = unoffsetClip16u(vmin, vrange, volt);
     uint8_t level = LEVEL_MIN;
     level += mul32ux16u(slope, volt) / ONE;
-    setLevelToLeds(level);
+    level2Leds(level);
 }
 
-static void setLevelToLeds(uint8_t level) {
+static void level2Leds(uint8_t level) {
     int8_t tmp = level;
     for (uint8_t iled = 0; iled < NUM_LEDS; iled++) {
         int8_t val = tmp;
@@ -367,7 +376,7 @@ static void setLevelToLeds(uint8_t level) {
     }
 }
 
-static void driveLeds() {
+static void driveLeds(void) {
     ledPhaseStepCntr = CYCLIC_INCR_8U(ledPhaseStepCntr, LED_PHASE_STEP_CNTR_PERIOD);
     uint8_t phase = ledPhase;
     if (ledPhaseStepCntr == 0) {
@@ -399,6 +408,7 @@ static void lazyDelayMs(uint8_t duration) {
     }
 }
 
+// オフセット除去 + クリッピング
 static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val) {
     if (val < min) return 0;
     val -= min;
@@ -406,6 +416,7 @@ static uint16_t unoffsetClip16u(uint16_t min, uint16_t range, uint16_t val) {
     return val;
 }
 
+// CYCLIC_INCR_8U の period が 2 のべき乗でない時用
 static uint8_t cyclicIncr8u(uint8_t x, uint8_t period) {
     return (x + 1 < period) ? x + 1 : 0;
 }
